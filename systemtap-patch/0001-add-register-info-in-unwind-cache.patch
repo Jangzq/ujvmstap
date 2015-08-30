@@ -1,0 +1,38 @@
+From 60cb7fddf990e649ffd749a9509cd6e8c5947792 Mon Sep 17 00:00:00 2001
+From: Zhang Zhiqiang <zqzhangmail@163.com>
+Date: Sun, 30 Aug 2015 19:44:23 +0800
+Subject: [PATCH] add register info in unwind cache
+
+Signed-off-by: Zhang Zhiqiang <zqzhangmail@163.com>
+---
+ runtime/stack.c         | 1 +
+ runtime/unwind/unwind.h | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/runtime/stack.c b/runtime/stack.c
+index a7d03db..2fdcb32 100644
+--- a/runtime/stack.c
++++ b/runtime/stack.c
+@@ -536,6 +536,7 @@ static unsigned long _stp_stack_user_get(struct context *c, unsigned depth)
+ 	while (c->uwcache_user.depth <= depth) {
+ 		pc = c->uwcache_user.pc[c->uwcache_user.depth]
+ 		   = _stp_stack_unwind_one_user(c, c->uwcache_user.depth);
++		c->uwcache_user.regs[c->uwcache_user.depth] = c->uwcontext_user.info.regs;
+ 		c->uwcache_user.depth ++;
+ 		if (pc == 0) {
+ 			/* Mark unwind completed. */
+diff --git a/runtime/unwind/unwind.h b/runtime/unwind/unwind.h
+index d72f68d..6c5d2e8 100644
+--- a/runtime/unwind/unwind.h
++++ b/runtime/unwind/unwind.h
+@@ -520,6 +520,7 @@ struct unwind_cache {
+ 	} state;
+ 	unsigned depth; /* pc[0..(depth-1)] contains valid entries */
+ 	unsigned long pc[MAXBACKTRACE];
++	struct pt_regs regs[MAXBACKTRACE];
+ };
+ 
+ #endif /*_STP_UNWIND_H_*/
+-- 
+1.9.1
+
