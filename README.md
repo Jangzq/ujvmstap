@@ -14,13 +14,27 @@ icedtea项目也包含一个得到java调用栈的tapset，但是因为下列原
 请参考我的技术博客文章[SYSTEMTAP中得到java调用栈](http://jangzq.info/2015/08/30/jstack/)
 
 ##systemtap patch
-我已经将修改的systemtap代码提交了patch，在没有被合并进去之前，请自行打补丁，补丁地址：
+我已经将修改的systemtap代码提交了patch，在没有被合并进去之前，请自行打补丁，补丁地址：[https://github.com/Jangzq/ujvmstap/tree/master/systemtap-patch](https://github.com/Jangzq/ujvmstap/tree/master/systemtap-patch)
 
 
 ##安装
 将ujvmstack.stp拷贝到systemtap安装目录的share/systemtap/tapset目录下。
+替换其中的`/opt/openjdk7/lib/amd64/server/libjvm.so`为自己jdk的相应值。
 
+##使用
+可以参考火焰图程序：jstackflame.stap了解使用方法。
+可以设置以下参数：
+**print_ustack**: 是否打印native方法里的调用栈。
+**print_vmself**: 是否打印JVM本身的调用栈，如gc代码。
+提供的API：
+function ujvm_stack:string(max_depth:long)
+得到jvm调用栈
 
+function ujvm_print_stack:long(stack_str:string)
+打印调用栈
+
+##示例
+见[ujvmstap demo](http://192.168.40.133:4000/2015/08/30/jstack_demo/)
 
 
 ##Copyright and License
