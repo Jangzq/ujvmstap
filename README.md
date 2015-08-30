@@ -45,7 +45,7 @@ function ujvm_print_stack:long(stack_str:string)
 打印调用栈
 
 ##示例
-见[ujvmstap demo](http://192.168.40.133:4000/2015/08/30/jstack_demo/)
+见[ujvmstap demo](http://jangzq.info/2015/08/30/jstack_demo/)
 
 
 ##Copyright and License
