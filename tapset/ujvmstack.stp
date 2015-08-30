@@ -1,0 +1,764 @@
+global print_vmself = 0;
+global ujvm_debug = 0;
+global print_ustack = 0;
+
+
+global ujvm_sp_register;
+global ujvm_fp_register;
+global ujvm_pc_register;
+global ujvm_ptr_size;
+global ujvm_ptr_mask;
+
+global ujvm_crs_pos;
+global ujvm_bci;
+global ujvm_line;
+//global ujvm_compile_cached_bci;
+global ujvm_print_line_num = 0;
+
+
+/*******************************************************************************************/
+/*                    CodeHeap/Cache/Blob Methods                                                     *
+/*                                                                                         */
+/*******************************************************************************************/
+
+function _cache_memory_low:long(_heap:long) {
+	return @cast(_heap, "CodeHeap",
+		"/opt/openjdk7/lib/amd64/server/libjvm.so")->_memory->_low;
+}
+
+function _cache_memory_heigh:long(_heap:long) {
+	return @cast(_heap, "CodeHeap",
+		"/opt/openjdk7/lib/amd64/server/libjvm.so")->_memory->_high;
+}
+
+function _cache_segmap_low:long(_heap:long) {
+	return @cast(_heap, "CodeHeap",
+		"/opt/openjdk7/lib/amd64/server/libjvm.so")->_segmap->_low;
+}
+
+function _log2_segment_size:long(_heap:long) {
+	return @cast(_heap, "CodeHeap",
+		 "/opt/openjdk7/lib/amd64/server/libjvm.so")->_log2_segment_size;
+}
+
+function code_heap_segment_for:long(p:long, _heap:long) {
+	_cache_memory_low = _cache_memory_low(_heap);
+	_log2_segment_size = _log2_segment_size(_heap);
+	return (p - _cache_memory_low) >> _log2_segment_size; 
+}
+
+
+
+function codeheap_block_at:long(i:long, _heap:long) {
+	_cache_memory_low = _cache_memory_low(_heap);
+	_log2_segment_size = _log2_segment_size(_heap);
+	return _cache_memory_low+(i<<_log2_segment_size);
+}
+
+function get_codeblob:long(p:long) {
+	_heap = @var("_heap@codeCache.cpp", "/opt/openjdk7/lib/amd64/server/libjvm.so")
+	if(p>=_cache_memory_heigh(_heap) || p<_cache_memory_low(_heap)) {
+		return 0;
+	}
+	i = code_heap_segment_for(p, _heap);
+	tag = user_char(_cache_segmap_low(_heap) + i) & 0xFF;
+	if(tag == 0xFF) {
+		return 0;
+	}
+	while (tag > 0) {
+		i = i - tag;
+		tag = user_char(_cache_segmap_low(_heap) + i) & 0xFF;
+	}
+	h = codeheap_block_at(i, _heap);
+	used = @cast(h, "HeapBlock",
+		"/opt/openjdk7/lib/amd64/server/libjvm.so")->_header->_used; 
+	if(!used) {
+		return 0;
+	}
+	HeapBlock_size = &@cast(0, "HeapBlock",
+		"/opt/openjdk7/lib/amd64/server/libjvm.so")[1];
+	return h+HeapBlock_size;
+}
+
+
+function is_nmethod:long(cb:long) {
+	head_size = @cast(cb, "CodeBlob",
+		"/opt/openjdk7/lib/amd64/server/libjvm.so")->_header_size;
+	nmethod_size = &@cast(0, "nmethod",
+		"/opt/openjdk7/lib/amd64/server/libjvm.so")[1];
+	return head_size == nmethod_size;
+}
+
+
+
+function is_runtime_stub:long(cb:long) {
+	head_size = @cast(cb, "CodeBlob",
+		"/opt/openjdk7/lib/amd64/server/libjvm.so")->_header_size;
+	runtime_size = &@cast(0, "RuntimeStub",
+		"/opt/openjdk7/lib/amd64/server/libjvm.so")[1];
+	return head_size == runtime_size;
+}
+
+
+/*******************************************************************************************/
+/*                    oopMethodDesc Methods                                                     *
+/*                                                                                         */
+/*******************************************************************************************/
+
+
+/**
+ * return the method's name and args by method oop
+ */
+function get_method_by_oop:string(methodOopPtr:long) {
+	try {
+		oopDesc_size = 2 * ujvm_ptr_size;
+		constMethodPtr = @cast(methodOopPtr, "methodOopDesc",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_constMethod;
+		constants = @cast(constMethodPtr, "constMethodOopDesc",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_constants;
+		constantPoolOopDesc_size = &@cast(0, "constantPoolOopDesc", "/opt/openjdk7/lib/amd64/server/libjvm.so")[1];
+		constant_pool = constants + constantPoolOopDesc_size;
+      			
+		klass_ptr = @cast(constants, "constantPoolOopDesc",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_pool_holder;
+		klass_name = @cast(klass_ptr + oopDesc_size, "Klass",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_name;
+		klass_name_str = &@cast(klass_name, "Symbol",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_body[0];
+		klass_name_len = @cast(klass_name, "Symbol",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_length;
+  
+		method_name_Index = @cast(methodOopPtr, "methodOopDesc",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_constMethod->_name_index;
+		method_symbol = user_long(constant_pool + (method_name_Index * ujvm_ptr_size)) - 1;
+		methodName = &@cast(method_symbol, "Symbol",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_body[0];
+		methodLength = @cast(method_symbol, "Symbol",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_length;
+		sigIndex = @cast(methodOopPtr, "methodOopDesc",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_constMethod->_signature_index;
+		sig_symbol = user_long(constant_pool
+			+ (sigIndex * ujvm_ptr_size)) - 1;
+		sigName = &@cast(sig_symbol, "Symbol",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_body[0];
+		sigLength = @cast(sig_symbol, "Symbol",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_length;
+		sig = user_string_n(sigName, sigLength);
+		sig = str_replace(sig, ";",",");
+
+		return sprintf("%s.%s%s",
+			user_string_n(klass_name_str, klass_name_len),
+			user_string_n(methodName, methodLength), sig);
+	} catch(msg) {
+		if(ujvm_debug) {
+			printf("caught exception, %s\n", msg);
+		}
+		return "";
+	}
+}
+
+/*******************************************************************************************/
+/*                    Get Source Code Line Methods                                                     *
+/*                                                                                         */
+/*******************************************************************************************/
+
+function ujvm_upper_offset_limit:long()%{
+	STAP_RETVALUE = (unsigned int)-1 >> 1;
+%}
+
+function comRdStrm_decode_sign:long (value:long) %{ 
+	STAP_RETVALUE=(STAP_ARG_value >> 1) ^ -(int)(STAP_ARG_value & 1);
+%}
+
+function str_index_of:long(str:string, c:string) %{ 
+	int i = 0;
+	int len = 0;
+	if(strlen(STAP_ARG_c) != 1) {
+		STAP_RETVALUE = -1;
+		return;
+	}
+	len = strlen(STAP_ARG_str);
+	for(i=0; i<len && ((char)STAP_ARG_str[i])!=STAP_ARG_c[0] ;i++);
+	if(i<len) {
+		STAP_RETVALUE=i;
+	} else {
+		STAP_RETVALUE=-1;
+	}
+%}
+
+
+function comRdStrm_read:long(buffer:long) {
+	tid = tid();
+	current_pos = ujvm_crs_pos[tid];
+	ujvm_crs_pos[tid] = current_pos+1;
+	return user_char(buffer+current_pos)&0xFF; 
+}
+
+function comRdStrm_read_int:long(buffer:long) { 
+	lg_H = 6;
+	H = 1<<lg_H;
+	L = (1<<8)-H;
+	b0 = comRdStrm_read(buffer);
+	if (b0 < L) {
+		return b0;
+	} else {
+		return comRdStrm_read_int_mb(buffer, b0);
+	}
+}
+
+function comRdStrm_read_signed_int:long(buffer:long) {
+	value = comRdStrm_read_int(buffer);
+	return comRdStrm_decode_sign(value);
+}
+                                       
+
+function comRdStrm_read_int_mb:long(buffer:long, b0:long) {
+	tid=tid();
+	lg_H = 6;
+	H = 1<<lg_H;
+	L = (1<<8)-H;
+	MAX_i = 4;
+	current_pos = ujvm_crs_pos[tid];
+  
+	pos = current_pos - 1;
+	buf = buffer + pos;
+	sum = b0;
+  
+	lg_H_i = lg_H;
+	for (i = 0; ; ) {
+		i++;
+		b_i = user_int8(buf+i); // b_i = read(); ++i;
+		sum += b_i << lg_H_i;  // sum += b[i]*(64**i)
+		if (b_i <L  || i == MAX_i) {
+			ujvm_crs_pos[tid] = pos+i+1;
+		  return sum;
+		}
+		lg_H_i += lg_H;
+	}
+}
+
+function linenum_read_pair:long(buffer:long) {
+	tid = tid();
+	_bci = ujvm_bci[tid];
+	_line = ujvm_line[tid];
+	_next = comRdStrm_read(buffer)&0xFF;
+	//printf("_next %d\n", _next);
+	if (_next == 0) return 0;
+	if (_next == 0xFF) {
+		_bci  += comRdStrm_read_signed_int(buffer);
+		_line += comRdStrm_read_signed_int(buffer);
+	} else {
+	  // Single byte compression used
+		_bci  += _next >> 3;
+		_line += _next & 0x7;
+	}
+	//printf("cal _line %d, _bci %d\n", _line, _bci);
+	ujvm_line[tid] = _line;
+	ujvm_bci[tid] = _bci;
+	return 1;
+}
+
+function has_linenumber_table:long(methodOopPtr:long) {
+	//printf("has linenum run\m");
+	flag = @cast(methodOopPtr, "methodOopDesc",
+		"/opt/openjdk7/lib/amd64/server/libjvm.so")->_constMethod->_flags;
+	return (flag & 1) != 0;
+}
+
+function comRdStrm_linenum_from_bci:long(bci:long, methodOopPtr:long) {
+	try {
+		if (bci == -1) bci = 0;
+		best_bci  =  0;
+		best_line = -1;
+		tid = tid();
+		if (has_linenumber_table(methodOopPtr)) {
+			ujvm_crs_pos[tid] = 0;
+			ujvm_bci[tid] = 0;
+			ujvm_line[tid]=0;
+			buffer = ujvm_compressed_linenumber_table(methodOopPtr); 	
+			while (linenum_read_pair(buffer)) {
+				current_bci = ujvm_bci[tid];
+		  	
+				if (current_bci == bci) {
+					return ujvm_line[tid];
+				} else {
+					// update best_bci/line
+					if (current_bci < bci && current_bci >= best_bci) {
+						best_bci  = current_bci;
+						best_line = ujvm_line[tid];
+					}
+				}
+			}
+			delete ujvm_crs_pos[tid];
+			delete ujvm_line[tid];
+			delete ujvm_bci[tid];
+		}
+		return best_line;
+	} catch {
+	}
+}
+
+
+function ujvm_compressed_linenumber_table(methodOopPtr:long) {
+	constMethod_size = &@cast(0, "constMethodOopDesc", "/opt/openjdk7/lib/amd64/server/libjvm.so")[1];
+	const_method = @cast(methodOopPtr, "methodOopDesc",
+		"/opt/openjdk7/lib/amd64/server/libjvm.so")->_constMethod;
+	constMethod_code_base = const_method + constMethod_size;
+	constMethod_code_end = constMethod_code_base+@cast(const_method, "constMethodOopDesc",
+		"/opt/openjdk7/lib/amd64/server/libjvm.so")->_code_size;
+	//printf("code end: %lx\n", constMethod_code_end);
+	return constMethod_code_end;
+}
+
+//nmethod bci
+function ujvm_pc_desc_at:long(pc:long, nm:long) {
+	pcDesc_size =  &@cast(0, "PcDesc", "/opt/openjdk7/lib/amd64/server/libjvm.so")[1];
+	base_address = nm+@cast(nm, "CodeBlob",
+		"/opt/openjdk7/lib/amd64/server/libjvm.so")->_code_offset;
+ 
+	if ((pc < base_address) ||
+		(pc - base_address) >= ujvm_upper_offset_limit()) {
+		return 0;
+	}
+	pc_offset = pc - base_address;
+	//printf("pc_offset %d\n", pc_offset);
+
+
+	lower = nm+@cast(nm, "nmethod",
+		"/opt/openjdk7/lib/amd64/server/libjvm.so")->_scopes_pcs_offset;
+	upper = nm+@cast(nm, "nmethod",
+		"/opt/openjdk7/lib/amd64/server/libjvm.so")->_dependencies_offset;
+	//printf("lower %lx, uppper %lx\n", lower, upper);
+
+	upper -= 1; 
+	if (lower >= upper)  return 0;
+
+	LOG2_RADIX = 4;
+	//  RADIX = (1 << LOG2_RADIX);
+	for (step = (1 << (LOG2_RADIX*3)); step > 1; step >>= LOG2_RADIX) {
+		//printf("step %d\n", step);
+		while ((mid = lower + step*pcDesc_size) < upper) {
+			mid_offset = @cast(mid, "PcDesc",
+				"/opt/openjdk7/lib/amd64/server/libjvm.so")->_pc_offset;
+			//printf("mid: %lx, mid_offset %d\n",mid, mid_offset);
+			if (mid_offset < pc_offset) {
+				lower = mid;
+			} else {
+				upper = mid;
+				break;
+			}
+		}
+	}
+ 	//printf("lower %lx, upper %lx\n", lower, upper);
+	while (1) {
+		mid = lower + pcDesc_size;
+		mid_offset = @cast(mid, "PcDesc",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_pc_offset;
+		//printf("second %lx, mid_offset %d\n", mid, mid_offset);
+		if (mid_offset < pc_offset) {
+			lower = mid;
+		} else {
+			upper = mid;
+			break;
+		}
+	}
+	upper_offset = @cast(upper, "PcDesc",
+		"/opt/openjdk7/lib/amd64/server/libjvm.so")->_pc_offset;
+	last_upper_offset = @cast(upper-pcDesc_size, "PcDesc",
+		"/opt/openjdk7/lib/amd64/server/libjvm.so")->_pc_offset;
+	//printf("last offset %d, upper offset %d\n", last_upper_offset,upper_offset);
+	if (last_upper_offset < pc_offset 
+		&& pc_offset <= upper_offset) {
+		return upper;
+	} else {
+		return 0;
+	}
+}
+
+function ujvm_get_compile_bci:long(nmethod:long, pc:long) {
+	try {
+//		bci = ujvm_compile_cached_bci[pid(), nmethod, pc];
+//		if(bci != 0) {
+//			return bci;
+//		}
+		pc_desc = ujvm_pc_desc_at(pc, nmethod);
+		//printf("cp_desc : %lx\n", pc_desc);
+		if(pc_desc == 0) {
+			return 0;
+		}
+		_scope_decode_offset = @cast(pc_desc, "PcDesc",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_scope_decode_offset;
+		tid = tid();
+  	
+		buffer =  nmethod+@cast(nmethod, "nmethod",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_scopes_data_offset;
+		ujvm_crs_pos[tid] = _scope_decode_offset;
+		comRdStrm_read_int(buffer);
+		comRdStrm_read_int(buffer);
+		bci = comRdStrm_read_int(buffer) -1;
+		delete ujvm_crs_pos[tid];
+//		ujvm_compile_cached_bci[pid(), nmethod, pc] = bci;
+		return bci;
+	} catch {
+		return 0;
+	}
+}
+
+function ujvm_get_interp_bci:long(methodOopPtr:long, fp:long) {
+	try {
+		if(methodOopPtr != 0) {
+			//printf("in interp fp %lx, methodOopPtr:%lx\n", fp, methodOopPtr);
+			bcx = user_long(fp + (-7 * ujvm_ptr_size)) & ujvm_ptr_mask;
+			constMethodOop_size =  &@cast(0, "constMethodOopDesc", "/opt/openjdk7/lib/amd64/server/libjvm.so")[1];
+  	
+			code_base = @cast(methodOopPtr, "methodOopDesc",
+				"/opt/openjdk7/lib/amd64/server/libjvm.so")->_constMethod+constMethodOop_size;
+			bci = bcx-code_base;
+			//printf("%lx:%s in inter, bcx %lx, code_base %lx, bci %d\n", pc, get_method_by_nmethodoop(methodOopPtr),bcx, code_base, bci);
+			return bci;
+		} else {
+			return 0;
+		}
+	} catch {
+		return 0;
+
+	}
+}
+
+
+
+//new
+function ujvm_get_source_name:string(methodOopPtr:long) {
+	try {
+		oopDesc_size = 2 * ujvm_ptr_size;
+		constMethodPtr = @cast(methodOopPtr, "methodOopDesc",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_constMethod;
+		constants = @cast(constMethodPtr, "constMethodOopDesc",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_constants;
+      			
+		klass_ptr = @cast(constants, "constantPoolOopDesc",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_pool_holder;
+  
+		srcNameSymbol = @cast(klass_ptr + oopDesc_size, "instanceKlass",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_source_file_name;
+  
+		srcName = &@cast(srcNameSymbol, "Symbol",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_body[0];
+		srcNameLength = @cast(srcNameSymbol, "Symbol",
+			"/opt/openjdk7/lib/amd64/server/libjvm.so")->_length;
+		return user_string_n(srcName, srcNameLength);
+	} catch {
+	}
+}
+
+
+/*******************************************************************************************/
+/*                    Init Methods                                                     *
+/*                                                                                         */
+/*******************************************************************************************/
+
+function ujvm_stack_init:long() {
+	if(execname() != "java") {
+		log("can watch java process only");
+		exit();
+	}
+	%( arch == "i386" %?
+		ujvm_sp_register = "esp";
+		ujvm_fp_register = "ebp";
+		ujvm_pc_register = "eip";
+		ujvm_ptr_size = 4;
+		ujvm_ptr_mask = 0xFFFFFFFF;
+	%: 
+		%(arch == "x86_64" %?
+			ujvm_sp_register = "rsp";
+			ujvm_fp_register = "rbp";
+			ujvm_pc_register = "rip";
+			ujvm_ptr_size = 8; 
+			ujvm_ptr_mask = 0xFFFFFFFFFFFFFFFF;
+		%:
+			log("unsupported platform, exit")
+			exit();
+		%) 
+	%)
+	return 1;
+}
+
+
+/*******************************************************************************************/
+/*                    Get Stack Methods                                                     *
+/*                                                                                         */
+/*******************************************************************************************/
+
+
+function truncate_last_element:string(str:string) %{ 
+	int i = 0;
+	for(i=strlen(STAP_ARG_str)-1;i>=0 && STAP_ARG_str[i]!=' ';i--);
+	if(i>=0) {
+		strlcpy(STAP_RETVALUE, STAP_ARG_str, i+1);
+	} 
+%}
+
+
+function ujvm_get_stack:string() {
+	return ujvm_stack(64);
+}
+
+
+
+/**
+ * pc is in interpre codes? 
+ */
+function is_interp_frame:long(pc:long) {
+	try {
+		codePtr = @var("_code@interpreter.cpp", "/opt/openjdk7/lib/amd64/server/libjvm.so");
+		if(codePtr) {
+			stub_buffer = @cast(codePtr, "StubQueue",
+				"/opt/openjdk7/lib/amd64/server/libjvm.so")->_stub_buffer;
+			buffer_limit = @cast(codePtr, "StubQueue",
+				"/opt/openjdk7/lib/amd64/server/libjvm.so")->_buffer_limit;
+//			printf("stub_buffer %lx, buffer_limit %lx\n", stub_buffer,stub_buffer+buffer_limit);
+			if(stub_buffer <= pc && pc < stub_buffer + buffer_limit) {
+				return 1;
+			} else {
+				return 0;
+			}
+		} else {
+			return 0
+		}
+	} catch {
+		return 0;
+	}
+}
+
+function is_code_heap:long(pc:long) {
+	_heap = @var("_heap@codeCache.cpp", "/opt/openjdk7/lib/amd64/server/libjvm.so")
+	if(_cache_memory_low(_heap) <= pc && pc < _cache_memory_heigh(_heap)) {
+		return 1;
+	}
+	return 0;
+} 
+
+
+/**
+ * After call ubacktrace(), get the register values, include ip, sp, bp, from the bottom of call stack.
+ */
+function z_get_last_ip:long () %{ 
+		STAP_RETVALUE=(CONTEXT->uwcache_user.regs[CONTEXT->uwcache_user.depth-1]).ip;
+%}
+function z_get_last_sp:long () %{ 
+		STAP_RETVALUE=(CONTEXT->uwcache_user.regs[CONTEXT->uwcache_user.depth-1]).sp;
+%}
+function z_get_last_fp:long () %{ 
+		STAP_RETVALUE=(CONTEXT->uwcache_user.regs[CONTEXT->uwcache_user.depth-1]).bp;
+%}
+
+
+
+/**
+ * main method for get stack.
+ * return: stack, if error return ""
+ */	
+function _ujvm_stack:string(max_depth:long, start_sp:long, start_fp:long, start_pc:long) {
+	if(max_depth<=0) {
+		return "";
+	}
+	pc = start_pc;
+	depth = 0;
+	sp = start_sp;
+	fp = start_fp;
+	result = "";
+	try {
+		call_stub_return_address = @var("_call_stub_return_address", "/opt/openjdk7/lib/amd64/server/libjvm.so");
+	
+		first = 1;
+		while(pc && pc!=call_stub_return_address && max_depth>depth) {
+			methodOopPtr = 0;
+			if(ujvm_debug) {
+				printf("current  pc %lx, fp %lx, sp %lx\n", pc, fp, sp);
+			}
+			if(is_interp_frame(pc)) {
+				//interpreter
+				methodOopPtr = user_long(fp + (-3 * ujvm_ptr_size)) & ujvm_ptr_mask;
+				if(ujvm_debug) {
+					printf("%lx:%s  in interpreter\n", pc, get_method_by_oop(methodOopPtr));
+				}
+				if(ujvm_print_line_num) {
+					bci = ujvm_get_interp_bci(methodOopPtr, fp);
+				}
+  	    
+				pc = user_long(fp+(1 * ujvm_ptr_size)) & ujvm_ptr_mask;
+				sp = user_long(fp + (-1 * ujvm_ptr_size)) & ujvm_ptr_mask;
+				fp = user_long(fp) & ujvm_ptr_mask;
+			} else {
+				codeblob = get_codeblob(pc);
+				if(is_nmethod(codeblob)) {
+					methodOopPtr = @cast(codeblob, "nmethod",
+						"/opt/openjdk7/lib/amd64/server/libjvm.so")->_method;
+					if(ujvm_debug) {
+						printf("%lx:%s in compile\n", pc, get_method_by_oop(methodOopPtr));					
+					}
+					if(ujvm_print_line_num) {
+						bci = ujvm_get_compile_bci(codeblob, pc);
+					}
+
+				} else if(is_runtime_stub(codeblob)) {
+					if(ujvm_debug) {
+						printf("%lx is a runtime stub\n", codeblob);
+					}
+				} else {
+					if(ujvm_debug) {
+						log("other type code blob, don't process now");
+						return "";
+					}
+				}
+				frame_size = @cast(codeblob, "CodeBlob",
+					"/opt/openjdk7/lib/amd64/server/libjvm.so")->_frame_size;
+				//printf("run here frame_size %d\n", frame_size);
+				pc = user_long(sp+ujvm_ptr_size*frame_size-ujvm_ptr_size)& ujvm_ptr_mask;
+				fp = user_long(sp+ujvm_ptr_size*frame_size-2*ujvm_ptr_size)& ujvm_ptr_mask;			
+				sp = sp+ujvm_ptr_size*frame_size;
+			}
+			if(methodOopPtr) {
+				if(first) {
+					if(ujvm_print_line_num) {
+						result = sprintf("%lx+%d",methodOopPtr, bci);
+					} else {
+						result = sprintf("%lx",methodOopPtr);
+					}
+					first = 0;
+				}  else {
+					if(ujvm_print_line_num) {
+						result =   result . " " . sprintf("%lx+%d",methodOopPtr, bci) ;
+					} else {
+						result =   result . " " . sprintf("%lx",methodOopPtr) ;
+					}
+				}
+			} else {
+				if(ujvm_debug) {
+					printf("could not find methodOop\n");
+				}
+				return "";
+			}
+			depth=depth+1;
+		}
+	} catch {
+		if(ujvm_debug) {
+			printf("run here error\n");
+		}
+		return "0";
+	}
+	return result;
+}
+
+
+
+function ujvm_stack:string(max_depth:long) {
+	ujvm_stack_init();
+	try {
+		pc = uaddr();
+		if(is_code_heap(pc)) {
+			if(ujvm_debug) {
+				printf("first pc is in code heap: %lx\n", pc);
+			}
+			sp = register(ujvm_sp_register);
+			fp = register(ujvm_fp_register);
+		} else {
+			if(ujvm_debug) {
+				printf("first pc is in native, or jvm: %lx\n", pc);
+			}
+			ub = ubacktrace();
+			sprint_ustack(ub);
+			sp = z_get_last_sp();
+			fp = z_get_last_fp();
+			pc = z_get_last_ip();
+			if(ujvm_debug) {
+				printf("last sp %lx, last fp %lx, last pc %lx\n", sp, fp, pc);
+			}
+			if(!is_code_heap(pc)) {
+				if(ujvm_debug) {
+					printf("last pc is not in code heap, is jvm: %lx\n", pc);
+				}
+				if(print_vmself) {
+					return ub . "/0";
+				} else {
+					return "";
+				}
+			}
+		}
+		java_str = _ujvm_stack(max_depth, sp, fp, pc);
+		if(java_str != "") {
+			if(print_ustack) {
+				str_truncate_last = truncate_last_element(ub);
+				if(str_truncate_last != "") {
+					return str_truncate_last . "/". java_str;
+				} else {
+					return java_str;
+				}
+			} else {
+				return java_str;
+			}
+		} else {
+			return "";
+		}
+
+	} catch(msg) {
+		if(ujvm_debug) {
+			println("caught error ", msg) 
+		}
+		return "";
+	}
+}
+
+/*******************************************************************************************/
+/*                    print Stack Methods                                                     *
+/*                                                                                         */
+/*******************************************************************************************/
+function _ujvm_print_java_stack(stack_str:string) {
+	token = tokenize(stack_str, " ");
+	
+	while(token!="") {
+		if(ujvm_print_line_num) {
+			index = str_index_of(token, "+");
+			if(index > 0) {
+				oopToken = substr(token, 0, index);
+				bciToken = substr(token, index+1, strlen(token)-index-1);
+				oop = strtol(oopToken, 16);
+				bci = strtol(bciToken, 10);
+				line_num = comRdStrm_linenum_from_bci(bci, oop);
+				if(oop) {
+					name = get_method_by_oop(oop);
+					source_name = ujvm_get_source_name(oop);
+					printf(" 0x%lx: %s(%s:%d)\n", oop, name, source_name, line_num); 
+				}
+			}
+		} else {
+			oop = strtol(token, 16);
+			if(oop) {
+				name = get_method_by_oop(oop);
+				printf(" 0x%lx: %s\n", oop, name); 
+			}
+		}
+		token = tokenize(""," ");
+	}
+}
+
+function ujvm_print_stack:long(stack_str:string) {
+	if(stack_str=="") {
+		return 0;
+	}
+	st1 = tokenize(stack_str, "/");
+	if(st1 != "") {
+		st2 = tokenize("", "/");
+		if(st2 != "") {
+			print_ustack(st1);
+			if(st2 != "0") {
+				_ujvm_print_java_stack(st2);
+			}
+		} else {
+			_ujvm_print_java_stack(st1);
+		}
+	} 
+	return 1;
+}
+
+

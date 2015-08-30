@@ -1,0 +1,59 @@
+global stkinfo[4000];
+global irq_thread[200];
+global isExist = 0;
+global print_kernel;
+
+probe begin {
+	print_kernel = 0;
+	print_ustack = 0;
+	print_vmself = 1;
+}
+
+probe softirq.entry {
+	if(pid() == target()) {
+		irq_thread[tid()] = 1;
+	}
+}
+
+probe softirq.exit {
+	if(pid() == target()) {
+		irq_thread[tid()] = 0;
+	}
+}
+
+
+
+probe timer.profile {
+	if(pid() == target()) {
+		if(print_kernel && !user_mode()) {
+			k = backtrace();
+		} else {
+			k = "";
+		}
+		
+		if(user_mode() || !irq_thread[tid()]) {
+			st = ujvm_stack(64);
+		} else {
+			st = "";
+		}
+		
+		if(k!="" || st != "") {
+			stkinfo[k, st] <<< 1;  
+		}
+
+		if(isExist) {
+			foreach ([sys, usr] in stkinfo+) { 
+				if(sys != "")
+					print_stack(sys)
+				if(usr != "")
+					ujvm_print_stack(usr)
+      			printf("\t%d\n", @count(stkinfo[sys, usr]))
+			}
+			exit();
+		}
+	}
+}
+
+probe timer.s(10) { 
+	isExist =1;
+}
